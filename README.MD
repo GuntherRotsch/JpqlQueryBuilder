@@ -1,4 +1,4 @@
-PROJECT BELONGS TO THIS ORIGINAL [BLOG POST](http://htmlpreview.github.com/?https://github.com/GuntherRotsch/JpqlQueryBuilder/JPQL_query_builder_for_POJOs-Blog.html)
+PROJECT BELONGS TO THIS ORIGINAL [BLOG POST](http://htmlpreview.github.com/?https://github.com/GuntherRotsch/JpqlQueryBuilder/master/JPQL_query_builder_for_POJOs-Blog.html)
 
 # JPQL Query Builder for unmanaged POJOs
 
