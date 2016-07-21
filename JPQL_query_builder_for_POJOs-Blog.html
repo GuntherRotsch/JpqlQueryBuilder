@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>JPQL query builder for POJOs | bbv Blog</title>
+<link rel="stylesheet" type="text/css" media="all" href="style/style.css" />
+		<style type="text/css">
+img.wp-smiley,
+img.emoji {
+	display: inline !important;
+	border: none !important;
+	box-shadow: none !important;
+	height: 1em !important;
+	width: 1em !important;
+	margin: 0 .07em !important;
+	vertical-align: -0.1em !important;
+	background: none !important;
+	padding: 0 !important;
+}
+</style>
+</script>
+</head>
+
+<body class="single single-post postid-3468 single-format-standard">
+<div id="wrapper" class="hfeed">
+
+	<div id="main">
+
+		<div id="container">
+			<div id="content" role="main">
+
+			
+
+				<div id="post-3468" class="post-3468 post type-post status-publish format-standard hentry category-java tag-jee tag-jpa tag-jpql">
+					<h1 class="entry-title">JPQL query builder for POJOs</h1>
+
+					<div class="entry-meta">
+						<span class="meta-prep meta-prep-author">Posted on</span>
+						<span class="entry-date">March 2, 2016</span>
+						<span class="meta-sep">by Gunther Rotsch</span>
+						</div><!-- .entry-meta -->
+
+					<div class="entry-content">
+						<p>Standard JPA&#8217;s query language JPQL provides several ways for retrieving managed entities from a relational database: Named queries, dynamic queries, queries based on criteria API, etc. Although, JPQL can also be used to query unmanaged objects, this is, according to my experience, rarely done. The reason for mostly refusing this feature is probably the inconvenient syntax, which can make maintenance and refactorings cumbersome.</p>
+<p><span id="more-3468"></span></p>
+<h2>Why not query POJOs with JPQL?</h2>
+<p>The syntax for querying POJOs with JPQL is basically:</p>
+<pre class="brush: java; title: ; notranslate" title="">SELECT NEW fully.qualified.result.object.clazz(arg0, arg1, ...) FROM ...</pre>
+<p>First, the result object&#8217;s class must be provided by its fully qualified name. Well, in dynamic queries, we could dynamically create the string with <code>ResultClass.class.getName()</code> to allow easy refactorings, i.e. renaming of class or moving to a different package.</p>
+<p>Second, the result class must provide a constructor, that takes all mapped properties. This can become cumbersome very quickly, especially if a lot of properties are mapped into the result object and/or the properties are of the same type, which makes you count arguments to figure out which mapped property belongs to which constructor argument.</p>
+<p>However, there are use cases you actually need or want to retrieve non-entity objects from JPA&#8217;s datastore:</p>
+<ul>
+<li>Application of aggregate functions in queries (MAX, MIN, SUM, AVG, etc.)</li>
+<li>Prevent eager fetching of related entities (performance) &#8211; for use cases related entities are not required.</li>
+<li>Avoid mapping between domain model and view model of presentation layer, when these models don&#8217;t match.</li>
+</ul>
+<p>In the following I outline an idea for a small framework, which tries to overcome the described issues.</p>
+<h2>Basic idea</h2>
+<p>The result objects of a non-entity JPQL query should be POJOs with our framework. Beside annotations the framework must not dictate a base class or an interface to be implement by result object class.<br />
+Similar to entities, for which annotations declaratively define the mapping to a database, the result object class will have annotations for mapping query attributes onto result object properties. It should look like:</p>
+<pre class="brush: java; title: ; notranslate" title="">
+@QueryFrom(&quot;Person p LEFT JOIN Address a&quot;)
+public PersonQueryResult {
+   @MappedFrom(&quot;p.lastName&quot;)
+   private String lastName;
+
+   @MappedFrom(&quot;p.firstName&quot;)
+   private String firstName;
+
+   @MappedFrom(&quot;a.city&quot;)
+   private String city;
+
+   // getter left out...
+}
+</pre>
+<p>In a real project situation additional annotations for filters may be desirable, but for now I&#8217;d like to focus on the mapping of query results. Please also note, that we work with JPQL here, native SQL queries are not considered.</p>
+<p>The framework should provide a <code>QueryBuilder</code> class, that takes an <code>EntityManager</code> and the result object class and returns a typed JPA query, for example:</p>
+<pre class="brush: java; title: ; notranslate" title="">
+TypedQuery&lt;PersonQueryResult&gt; query = QueryBuilder.forClass(PersonQueryResult.class)
+                                                  .build(entityManager);
+
+// query can then be used like any other JPA query, e.g.
+query.setFirstResult(100);
+query.setMaxResults(50);
+return query.getResultList();
+</pre>
+<p>The QueryBuilder relies only on the annotations <code>@QueryFrom</code> and <code>@MappedFrom</code>, and is therefore not limited to sample <code>PersonQueryResult</code> class. In order to simplify the implementation, the query result objects must have a no-arg constructor. Fields with <code>@MappedFrom</code> annotations must not be final, apparently.</p>
+<p>The whole logic for generating the query is in the builder. The magic, which happens there, isn&#8217;t that magic at all. After the given result class and its fields have been investigated for our annotations by reflection, the query builder dynamically generates a sub-class of the result type which has a constructor taking an argument for each mapped property. With this constructor, the sub-class is prepared for usage in queries with <code>SELECT NEW ...()</code> syntax. A query for the generated sub-class is compatible to its base class, for which a typed query is returned.</p>
+<p>The sub-class generation is the unusual part of our approach, but with high-level libraries like Byte-Buddy not that difficult, as we&#8217;ll see in the following chapter.</p>
+<h2>Implementation</h2>
+<p>Now, that the basic idea is clear, we jump into the implementation. For sake of simplicity and conciseness, the code snippets presented below are stripped to the minimum, i.e. don&#8217;t contain sanity checks, exception handling, logging etc., which would be required in real world projects.</p>
+<p>Please note, that the prototype has been implemented with Hibernate in a Java SE environment. Byte-Buddy was used in version 1.0.3 &#8211; for more information please see the excellent documentation on the <a href="http://bytebuddy.net/#/">Byte-Buddy Website</a>.</p>
+<p>The core of our small framework is the <code>QueryBuilder#enhance()</code> method. Here, we filter in a first step the fields from the query result class, that take the <code>@MappedFrom</code> annotation, i.e. determine properties that need to be initialized by a constructor. The class <code>PersonQueryResult</code> shown above is an example of such a query result class, we are going to enhance.</p>
+<pre class="brush: java; title: ; notranslate" title="">
+List&lt;Field&gt; mappedFields = Arrays.asList(resultClazz.getDeclaredFields())
+                                 .stream()
+                                 .filter(f -&gt; f.getAnnotation(MappedFrom.class) != null)
+                                 .collect(Collectors.toList());
+</pre>
+<p>For the definition of the generated constructor, the types of mapped fields are retrieved from the list of fields.</p>
+<pre class="brush: java; title: ; notranslate" title="">
+Class&lt;?&gt;[] fieldTypes = mappedFields.stream()
+                                    .map(f -&gt; f.getType())
+                                    .collect(Collectors.toList())
+                                    .toArray(new Class&lt;?&gt;[] {});
+</pre>
+<p>Using extracted information, the sub-class can already be generated using Byte Buddy:</p>
+<pre class="brush: java; title: ; notranslate" title="">
+Unloaded unloadedSubClass =
+       new ByteBuddy().with(new NamingStrategy.SuffixingRandom(&quot;Query&quot;))
+                      .subclass(resultClazz)
+                      .defineConstructor(VARARGS, PUBLIC)
+                      .withParameters(fieldTypes)
+                      .intercept(MethodCall.invoke(resultClazz.getDeclaredConstructor())
+                                           .andThen(MethodDelegation.to(new ConstructorInitializer(mappedFields))))
+                      .make();
+</pre>
+<p>The chosen naming strategy isn&#8217;t mandatory, because Byte Buddy comes with reasonable defaults. But it&#8217;s nice to have the Query suffix included, which can give users a hint from where the class comes in case of exceptions.</p>
+<p>Please note, that the call of <code>withParameters()</code> method takes the array of the types of result class&#8217; mapped properties. That way, we define a constructor, that is appropriate to be used with JPA&#8217;s<code> SELECT NEW ...()</code> syntax.<br />
+The generated constructor gets now intercepted by following logic:</p>
+<ol>
+<li>The no-arg default constructor of base class is called.</li>
+<li>The call is delegated to an instance of ConstructorInitializer class, to which we come back in a second. For now, it&#8217;s just important that the list of mapped fields is handed over to this initializer.</li>
+</ol>
+<p>The generated class exists as byte code on the heap now, but isn&#8217;t loaded into the JVM yet, as the name suggests. The loading of generated classes can also be done by Byte Buddy, whereby several strategies exist. For our purposes the injection into the system-classloader, which is the child of extension-classloader, is appropriate:</p>
+<pre class="brush: java; title: ; notranslate" title="">
+Class&lt;?&gt; subClass = unloadedSubClass.load(ClassLoader.getSystemClassLoader(),
+                                          ClassLoadingStrategy.Default.INJECTION)
+                                    .getLoaded();
+</pre>
+<p>The default class loading strategy of Byte-Buddy would use a child classloader. But for our application it&#8217;s important to use a classloader closer to the root of classloader hierarchy. Otherwise the generated class won&#8217;t be visible to Hibernate, which in our case needed to instantiate result class objects as part of the <code>SELECT NEW ...()</code>.</p>
+<p>Please note, that for practical use the generated enhanced classes should be kept in a caching map, which is keyed by the original result class. This is to ensure that a result class doesn&#8217;t get enhanced multiple times, in order to prevent Perm or Meta heap space gets polluted.</p>
+<p>Now we come back to the <code>ConstructorInitializer</code> class, which intercepts the constructor call. Such method interceptors can be defined for Byte-Buddy by a separate class, in our case a static inner class, which initializes the configured fields with current argument values by reflection:</p>
+<pre class="brush: java; title: ; notranslate" title="">
+public static class ConstructorInitializer {
+
+   private final List&lt;Field&gt; fields;
+
+   ConstructorInitializer(List&lt;Field&gt; fields) {
+      this.fields = fields;
+   }
+
+   public void init(@This Object self, @AllArguments Object... args) {
+      assert args.length == fields.size();
+      IntStream.range(0, args.length).forEach(i -&gt; setFieldValue(self, fields.get(i), args[i]));
+   }
+
+   private void setFieldValue(Object self, Field field, Object value) {
+      if (!field.isAccessible()) {
+         field.setAccessible(true);
+      }
+      try {
+         field.set(self, value);
+      } catch (IllegalArgumentException | IllegalAccessException e) {
+         throw new RuntimeException(&quot;Initialization of mapped property failed&quot;, e);
+      }
+   }
+}
+</pre>
+<p>The annotated method arguments allow Byte-Buddy to determine the intercepting method.</p>
+<p>That&#8217;s it, the core of the small framework, the generation of result class, is done.</p>
+<p>The query builder can now be used. Let&#8217;s say, we do have the sample <code>PersonQueryResult</code> class shown above. Then we can call our <code>enhance()</code> method and create the query string:</p>
+<pre class="brush: java; title: ; notranslate" title="">
+Class enhancedResultClass = queryBuilder.enhance(PersonQueryResult);
+
+StringBuilder queryStringBuilder = new StringBuilder();
+queryStringBuilder
+	.append(&quot;SELECT NEW &quot;).append(enhancedResultClass.getName())
+	.append(&quot;(&quot;)
+        .append(getPropertyNames()).append(&quot;) FROM &quot;)
+        .append(resultClass.getAnnotation(QueryFrom.class).value());
+
+LOGGER.debug(&quot;Query: {}&quot;, queryStringBuilder);
+</pre>
+<p>The logging output will be something like:</p>
+<pre class="brush: plain; title: ; notranslate" title="">DEBUG: Query: SELECT NEW ch.bbv.jpa.PersonQueryResult$Query$SQJ8b6mQ(p.id,p.firstName,p.lastName) FROM Person p
+</pre>
+<p>Please note, the name of the result class, which contains our <em>Query</em> suffix and a random number, which ensures uniqueness of generated class names.</p>
+<p>In the last step we generate the actual typed JPA query:</p>
+<pre class="brush: java; title: ; notranslate" title="">
+TypedQuery&lt;T&gt; query = em.createQuery(queryStringBuilder.toString(), resultClass);
+</pre>
+<p>This JPA query can now be further configured and eventually executed like any other JPA query.</p>
+<pre class="brush: java; title: ; notranslate" title="">
+List&lt;PersonQueryResult&gt; persons = query.getResultList();
+</pre>
+<p>The result list actually contains items of the generated class, but is parameterized by its base class, the original query result class.</p>
+<h2>Conclusion</h2>
+<p>This article demonstrates an application for byte-code generation at runtime, that allows to provide a nice API for selection of non-entity objects with JPQL. The annotation based API is similar to JPA&#8217;s <code>@NamedQueries</code>, to which JPA developers are used to.</p>
+<p>Byte-Buddy provides a convenient API for code generation, implemented on a high abstraction level. It&#8217;s possible to write runtime code-generation tools without deep knowledge of Java&#8217;s class file format or byte code, just using plain Java on a very high abstraction level.</p>
+<p>On github <a href="https://github.com/bbvch/JpqlQueryBuilder">https://github.com/bbvch/JpqlQueryBuilder</a> you’ll find running prototypical implementation of described functionality.</p>
+											</div><!-- .entry-content -->
+
+
+</div><!-- #wrapper -->
+
+<script type='text/javascript' src='./scripts/shCore.js'></script>
+<script type='text/javascript' src='./scripts/shBrushJava.js'></script>
+<script type='text/javascript'>
+	(function(){
+		var corecss = document.createElement('link');
+		var themecss = document.createElement('link');
+		if ( corecss.setAttribute ) {
+		var corecssurl = "./styles/shCore.css";
+				corecss.setAttribute( "rel", "stylesheet" );
+				corecss.setAttribute( "type", "text/css" );
+				corecss.setAttribute( "href", corecssurl );
+		} else {
+				corecss.rel = "stylesheet";
+				corecss.href = corecssurl;
+		}
+		document.getElementsByTagName("head")[0].insertBefore( corecss, document.getElementById("syntaxhighlighteranchor") );
+		var themecssurl = "./styles/shThemeDefault.css";
+		if ( themecss.setAttribute ) {
+				themecss.setAttribute( "rel", "stylesheet" );
+				themecss.setAttribute( "type", "text/css" );
+				themecss.setAttribute( "href", themecssurl );
+		} else {
+				themecss.rel = "stylesheet";
+				themecss.href = themecssurl;
+		}
+		//document.getElementById("syntaxhighlighteranchor").appendChild(themecss);
+		document.getElementsByTagName("head")[0].insertBefore( themecss, document.getElementById("syntaxhighlighteranchor") );
+	})();
+	SyntaxHighlighter.config.strings.expandSource = '+ expand source';
+	SyntaxHighlighter.config.strings.help = '?';
+	SyntaxHighlighter.config.strings.alert = 'SyntaxHighlighter\n\n';
+	SyntaxHighlighter.config.strings.noBrush = 'Can\'t find brush for: ';
+	SyntaxHighlighter.config.strings.brushNotHtmlScript = 'Brush wasn\'t configured for html-script option: ';
+	SyntaxHighlighter.defaults['pad-line-numbers'] = false;
+	SyntaxHighlighter.defaults['toolbar'] = false;
+	SyntaxHighlighter.all();
+</script>
+</body>
+</html>

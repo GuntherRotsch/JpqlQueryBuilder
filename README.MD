@@ -1,3 +1,5 @@
+PROJECT BELONGS TO THIS ORIGINAL [BLOG POST]( JPQL_query_builder_for_POJOs-Blog.html)
+
 # JPQL Query Builder for unmanaged POJOs
 
 This project contains sample code to the Blog post _Why not query POJOs with JPQL?_ on bbv site. The post outlines an idea, how the JPQL `SELECT NEW(...)` feature for querying unmanaged POJOs can be made more manageable and maintainable using byte-code generation.
